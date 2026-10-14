@@ -1,3 +1,8 @@
+v0.9.6
+Fix
+- Equipment Info: use C_Item APIs for item information, detailed item levels, and socketed gems to fix errors after upgrading to WoW 12.1.5.
+- Update the TOC interface to 120105 for WoW 12.1.5 and the addon version to 0.9.6.
+
 v0.9.5
 New features
 - Mage Hearthstone shortcut: add one option to prioritize Silvermoon City (Midnight), using Teleport when solo and Portal when in a party or raid, if the appropriate spell is learned and available.

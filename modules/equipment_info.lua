@@ -367,8 +367,8 @@ local function getSafeItemLevel(link, slotId, unit, tip, itemId, self)
       if cur and cur > 0 then return cur end
     end
   end
-  local _, _, _, ilvl = GetItemInfo(link)
-  local detailed = (GetDetailedItemLevelInfo and GetDetailedItemLevelInfo(link)) or nil
+  local _, _, _, ilvl = C_Item.GetItemInfo(link)
+  local detailed = (C_Item and C_Item.GetDetailedItemLevelInfo and C_Item.GetDetailedItemLevelInfo(link)) or nil
   local tipLevel = getItemLevelFromTooltipInfo(unit, slotId)
     or getItemLevelFromHyperlink(link)
     or getItemLevelFromHyperlinkTooltip(tip, link)
@@ -706,7 +706,7 @@ function M:GetSocketDisplayText(unit, db, slotId, link)
   local hasMaxRankGems, missingGems, gemCount = true, false, 0
   if totalSockets >= 1 then
     for gemid = 1, totalSockets do
-      local _, socketedGemLink = GetItemGem(link, gemid)
+      local _, socketedGemLink = C_Item.GetItemGem(link, gemid)
       if socketedGemLink then
         local gemItemID = getItemIdFromLink(socketedGemLink)
         if gemItemID and self.playerSlotItems and self.playerSlotItems[slotId] then
@@ -856,7 +856,7 @@ function M:RenderSlot(unit, slot, fsIL, fsEN, db, playerClass)
       dependencies[itemId] = true
       requestItemData(self, itemId)
     end
-    local _, _, _, _, _, _, _, _, _, _, _, itemType, itemSubtype = GetItemInfo(link)
+    local _, _, _, _, _, _, _, _, _, _, _, itemType, itemSubtype = C_Item.GetItemInfo(link)
 
     local linkForTip = dataLink or link
     local ilvl = getSafeItemLevel(linkForTip, slot.id, unit, self.tip, itemId, self)

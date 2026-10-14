@@ -26,6 +26,7 @@ Run the regression checks from the repository root with Lua 5.1 or newer:
 
 ```text
 lua tools/test_runtime.lua
+lua tools/test_equipment_info.lua
 lua tools/test_castbar_style.lua
 lua tools/test_quick_shortcuts.lua
 ```
