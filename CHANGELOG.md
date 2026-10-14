@@ -1,4 +1,18 @@
-v0.9.6
+v0.9.8
+New features
+- MM+ Keys: offer a dungeon teleport window when joining a Mythic+ group, using the listing's activity/map IDs to choose the destination.
+- Show whether the teleport is learned or on cooldown; cast through a secure button and defer opening during combat.
+- Add a persistent "Don't show again" checkbox and the corresponding Kaldo configuration option. Close the window after teleporting, entering the dungeon, or leaving the group.
+- Fix Changelog
+- MM+ Keys: add an opt-in Focus Kick setting with a choice of eight raid markers and an automatically maintained per-character KaldoFocusKick macro (focus + mark the selected enemy, without toggling the marker off).
+- Announce the chosen focus kick marker at ready checks in the identified Mythic+ dungeon before the key starts. Skip active runs, combat, locked chat and repeated ready-check events; never defer an announcement.
+
+Fix
+- MM+ Keys: fix old keystone group-acceptance reminders and the dungeon teleport popup reappearing after leaving a group and then joining another manually. A genuine new acceptance through Group Finder still displays the reminder and teleport window normally.
+- Focus Kick: also announce for the player starting the ready check through C_PartyInfo.DoReadyCheck and the initiator's READY_CHECK_CONFIRM, with shared event/hook deduplication and no announcement for rejected or locked requests. Use the documented C_PartyInfo.IsChallengeModeActive predicate for the party run state.
+- Focus Kick: use numeric macro icon file IDs with a visible fallback, and repair missing or incorrect icons even when the macro text is unchanged.
+
+v0.9.7
 Fix
 - Equipment Info: use C_Item APIs for item information, detailed item levels, and socketed gems to fix errors after upgrading to WoW 12.1.5.
 - Update the TOC interface to 120105 for WoW 12.1.5 and the addon version to 0.9.6.

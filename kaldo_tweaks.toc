@@ -2,7 +2,7 @@
 ## Title: Kaldo Tweaks
 ## Notes: Small tweaks for Blizz UI made by KaldoTV
 ## Author: KaldoTV
-## Version: 0.9.6
+## Version: 0.9.7
 ## SavedVariables: KaldoDB
 ## OptionalDeps: LibSharedMedia-3.0
 ## X-Curse-Project-ID: 1449925

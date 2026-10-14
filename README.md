@@ -27,6 +27,7 @@ Run the regression checks from the repository root with Lua 5.1 or newer:
 ```text
 lua tools/test_runtime.lua
 lua tools/test_equipment_info.lua
+lua tools/test_mm_keys.lua
 lua tools/test_castbar_style.lua
 lua tools/test_quick_shortcuts.lua
 ```
@@ -78,6 +79,8 @@ Adds a few Mythic+ quality-of-life helpers.
 - auto-insert your keystone when relevant
 - reply to `!key` / `!keys`
 - accepted-group reminders
+- optional Focus Kick marker, per-character focus/mark macro, and pre-key ready-check announcement (Mythic+ listing or inserted keystone required)
+- dungeon teleport window on joining a Mythic+ group, with learned/cooldown status and a persistent opt-out in the window or settings
 - season-best dungeon overlays and dungeon teleport buttons
 - regional/world score percentile estimates
 - optional filtering of stale guild roster scores

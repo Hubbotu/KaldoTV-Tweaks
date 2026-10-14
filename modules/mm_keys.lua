@@ -3,6 +3,7 @@ local ADDON_NAME, NS = ...
 local Kaldo = NS.Kaldo
 local L = NS.L
 local DB = NS.DB
+local MacroUtils = NS.MacroUtils
 
 local M = {}
 local tryHookChallengesFrame
@@ -17,6 +18,7 @@ M.events = {
   "ADDON_LOADED",
   "PLAYER_ENTERING_WORLD",
   "GROUP_ROSTER_UPDATE",
+  "GROUP_LEFT",
   "PLAYER_ROLES_ASSIGNED",
   "PARTY_LEADER_CHANGED",
   "PLAYER_SPECIALIZATION_CHANGED",
@@ -27,7 +29,9 @@ M.events = {
   "CHALLENGE_MODE_RESET",
   "CHALLENGE_MODE_MAPS_UPDATE",
   "SPELLS_CHANGED",
-  "LFG_PROPOSAL_SUCCEEDED",
+  "READY_CHECK",
+  "READY_CHECK_CONFIRM",
+  "READY_CHECK_FINISHED",
   "LFG_LIST_APPLICATION_STATUS_UPDATED",
   "LFG_LIST_JOINED_GROUP",
   "CHAT_MSG_PARTY",
@@ -91,6 +95,33 @@ local DUNGEON_TELEPORT_SPELLS = {
   [560] = 1254559, -- Maisara Caverns
 }
 
+local FOCUS_KICK_MACRO_NAME = "KaldoFocusKick"
+local FOCUS_KICK_MARKERS = {
+  { name = "Star", label = "MM_KEYS_MARKER_STAR" },
+  { name = "Circle", label = "MM_KEYS_MARKER_CIRCLE" },
+  { name = "Diamond", label = "MM_KEYS_MARKER_DIAMOND" },
+  { name = "Triangle", label = "MM_KEYS_MARKER_TRIANGLE" },
+  { name = "Moon", label = "MM_KEYS_MARKER_MOON" },
+  { name = "Square", label = "MM_KEYS_MARKER_SQUARE" },
+  { name = "Cross", label = "MM_KEYS_MARKER_CROSS" },
+  { name = "Skull", label = "MM_KEYS_MARKER_SKULL" },
+}
+
+local function getFocusKickMarker(icon)
+  local index = tonumber(icon)
+  if not index or index % 1 ~= 0 or not FOCUS_KICK_MARKERS[index] then index = 6 end
+  return index, FOCUS_KICK_MARKERS[index]
+end
+
+local function getFocusKickMarkerOptions()
+  local values = {}
+  for index, marker in ipairs(FOCUS_KICK_MARKERS) do
+    values[#values + 1] = { index, string.format("|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_%d:16:16|t %s",
+      index, L[marker.label] or marker.name) }
+  end
+  return values
+end
+
 -- Edit these rules directly in code. Highest matching minLevel wins.
 local KEY_LEVEL_COLOR_RULES = {
   { minLevel = 12, color = { 0.85, 0.60, 1.00, 1.00 } },
@@ -109,6 +140,9 @@ local defaults = {
   hide_stale_guild_scores = true,
   accept_reminder_chat = true,
   accept_reminder_screen = false,
+  accept_teleport_prompt = true,
+  focus_kick_enabled = false,
+  focus_kick_icon = 6,
   season_best_overlay = true,
   score_percentiles = true,
   score_color = { 1.00, 0.82, 0.00, 1.00 },
@@ -183,6 +217,8 @@ end
 
 function M:ResetDB()
   self.db = DB:ResetModuleState("MMKeys", defaults)
+  self:ClearAcceptedGroupState()
+  self:UpdateFocusKickMacro()
 end
 
 local function getKeystoneLinkFromBags()
@@ -538,6 +574,10 @@ function M:GetOptions()
     { type="header", text=self.displayName },
     { type="toggle", key="auto_insert", label=(L and L.MM_KEYS_AUTO_INSERT) or "Auto insert keystone on frame open" },
     { type="toggle", key="respond_keys", label=(L and L.MM_KEYS_RESPOND) or "Respond to !key/!keys" },
+    { type="header", text=L.MM_KEYS_FOCUS_KICK_HEADER },
+    { type="toggle", key="focus_kick_enabled", label=L.MM_KEYS_FOCUS_KICK_ENABLED },
+    { type="select", key="focus_kick_icon", label=L.MM_KEYS_FOCUS_KICK_ICON, values=getFocusKickMarkerOptions },
+    { type="label", text=L.MM_KEYS_FOCUS_KICK_HINT },
     { type="header", text=(L and L.MM_KEYS_SEASON_OVERLAY_HEADER) or "Season best overlay" },
     { type="toggle", key="season_best_overlay", label=(L and L.MM_KEYS_SEASON_OVERLAY_ENABLED) or "Show overlay on dungeon tiles" },
     { type="toggle", key="score_percentiles", label=(L and L.MM_KEYS_SCORE_PERCENTILES) or "Show score percentiles" },
@@ -556,7 +596,19 @@ function M:GetOptions()
     { type="header", text=(L and L.MM_KEYS_ACCEPT_HEADER) or "Group accepted reminder" },
     { type="toggle", key="accept_reminder_chat", label=(L and L.MM_KEYS_ACCEPT_CHAT) or "Reminder in chat" },
     { type="toggle", key="accept_reminder_screen", label=(L and L.MM_KEYS_ACCEPT_SCREEN) or "Reminder on screen" },
+    { type="toggle", key="accept_teleport_prompt", label=L.MM_KEYS_ACCEPT_TELEPORT },
   }
+end
+
+function M:HookFocusKickReadyCheck()
+  if self._focusKickReadyCheckHooked or not hooksecurefunc
+      or not (C_PartyInfo and C_PartyInfo.DoReadyCheck) then return end
+  -- Retail /readycheck uses this namespaced API. Cover the local initiator
+  -- after the API returns, as well as READY_CHECK events from other players.
+  hooksecurefunc(C_PartyInfo, "DoReadyCheck", function()
+    self:AnnounceFocusKick(true)
+  end)
+  self._focusKickReadyCheckHooked = true
 end
 
 function M:OnRegister()
@@ -564,19 +616,37 @@ function M:OnRegister()
   self._hooked = false
   self._seasonBestHooked = false
   self._lastInsert = 0
-  self._wasInGroup = nil
+  self._wasInGroup = IsInGroup and IsInGroup() or false
   self._pendingAcceptedGroupData = nil
   self._pendingAcceptedAt = 0
+  self._lastTeleportPromptID = nil
+  self._lastAcceptedGroupID = nil
+  self._acceptedTeleportGroup = nil
+  self._focusKickChallengeMapID = nil
+  self._focusKickRunStarted = false
+  self._focusKickReadyCheckHandled = false
+  self._pendingFocusKickMacro = nil
+  self._lastFocusKickAnnouncement = nil
   self._lastReminder = 0
   self._lastKeysResponseAt = 0
   self._seasonBestOverlays = {}
   self._scorePercentileOverlay = nil
   self._communitiesHooked = false
   self._guildScoreFilterButton = nil
+  self:HookFocusKickReadyCheck()
 end
 
-function M:OnOptionChanged()
+function M:OnOptionChanged(key)
   self.db = self:EnsureDB()
+  if key == "enabled" then
+    self:ClearAcceptedGroupState()
+    self._wasInGroup = IsInGroup and IsInGroup() or false
+  end
+  self:HookFocusKickReadyCheck()
+  if not key or key == "enabled" or key == "focus_kick_enabled" or key == "focus_kick_icon" then
+    self:UpdateFocusKickMacro()
+  end
+  self:RefreshAcceptedTeleportPrompt()
   tryHookChallengesFrame(self)
   tryHookCommunitiesFrame(self)
   self:UpdateGuildScoreFilterButton()
@@ -1546,6 +1616,28 @@ local function getSearchResultInfoByID(searchResultID)
   return nil
 end
 
+-- Resolve from Blizzard activity/map IDs rather than the group leader's text.
+local function getAcceptedChallengeMapID(ri)
+  if not (type(ri) == "table" and C_LFGList and C_LFGList.GetActivityInfoTable
+      and C_ChallengeMode and C_ChallengeMode.GetMapUIInfo) then return nil end
+  local activityIDs = ri.activityIDs or { ri.activityID }
+  local challengeMapID
+  for _, activityID in ipairs(activityIDs) do
+    local activity = C_LFGList.GetActivityInfoTable(activityID)
+    if activity and activity.isMythicPlusActivity and activity.mapID and activity.mapID > 0 then
+      local match
+      for mapID in pairs(DUNGEON_TELEPORT_SPELLS) do
+        local _, _, _, _, _, instanceMapID = C_ChallengeMode.GetMapUIInfo(mapID)
+        if instanceMapID == activity.mapID then match = mapID; break end
+      end
+      -- A listing with multiple different dungeons has no single destination.
+      if not match or (challengeMapID and challengeMapID ~= match) then return nil end
+      challengeMapID = match
+    end
+  end
+  return challengeMapID
+end
+
 local function getActivityNameFromInfo(ri)
   if type(ri) ~= "table" then return nil end
   local activityID = ri.activityID
@@ -1579,44 +1671,6 @@ local function extractKeyLabel(name, ri)
   return nil
 end
 
-local function getAcceptedGroupDataFromAppID(appID)
-  if not (C_LFGList and C_LFGList.GetApplicationInfo) then return nil end
-  if type(appID) ~= "number" then return nil end
-
-  local info, b, c = C_LFGList.GetApplicationInfo(appID)
-  local searchResultID, status, pendingStatus, name
-
-  if type(info) == "table" then
-    searchResultID = info.searchResultID or info.resultID
-    status = info.applicationStatus or info.status
-    pendingStatus = info.pendingStatus
-    name = info.name
-  else
-    searchResultID = info
-    status = b
-    pendingStatus = c
-  end
-
-  local ri = getSearchResultInfoByID(searchResultID)
-  if not name and ri then
-    name = ri.name
-  end
-
-  local function isAccepted(st)
-    return st == "invited" or st == "inviteaccepted"
-  end
-
-  if isAccepted(status) or isAccepted(pendingStatus) then
-    if not name or name == "" then return nil end
-    return {
-      groupName = name,
-      keyLabel = extractKeyLabel(name, ri),
-    }
-  end
-
-  return nil
-end
-
 local function getGroupDataFromSearchResultID(searchResultID, fallbackGroupName)
   local ri = getSearchResultInfoByID(searchResultID)
   if not ri then return nil end
@@ -1627,14 +1681,16 @@ local function getGroupDataFromSearchResultID(searchResultID, fallbackGroupName)
   return {
     groupName = groupName,
     keyLabel = extractKeyLabel(groupName, ri),
+    searchResultID = searchResultID,
+    mapChallengeModeID = getAcceptedChallengeMapID(ri),
   }
 end
 
-local function getAcceptedGroupDataFromEventArgs(searchResultID, status, pendingStatus, nameFromEvent)
+local function getAcceptedGroupDataFromEventArgs(searchResultID, status, nameFromEvent)
   local function isAccepted(st)
     return st == "invited" or st == "inviteaccepted"
   end
-  if not (isAccepted(status) or isAccepted(pendingStatus)) then return nil end
+  if not isAccepted(status) then return nil end
 
   local evName = trim(nameFromEvent)
   local fromSearch = getGroupDataFromSearchResultID(searchResultID, evName)
@@ -1650,31 +1706,278 @@ local function getAcceptedGroupDataFromEventArgs(searchResultID, status, pending
     return {
       groupName = evName,
       keyLabel = evName,
+      searchResultID = searchResultID,
     }
   end
 
   return nil
 end
 
-function M:ScanAcceptedGroupData()
-  if not (C_LFGList and C_LFGList.GetApplications) then return nil end
-  local apps = C_LFGList.GetApplications()
-  if type(apps) ~= "table" then return nil end
-  for _, appID in ipairs(apps) do
-    local data = getAcceptedGroupDataFromAppID(appID)
-    if data and data.groupName and data.groupName ~= "" then
-      return data
-    end
+function M:UpdateFocusKickMacro()
+  local db = self.db or self:EnsureDB()
+  if not (db.enabled and db.focus_kick_enabled) then
+    self._pendingFocusKickMacro = nil
+    self._focusKickReadyCheckHandled = false
+    return false
   end
-  return nil
+  if InCombatLockdown and InCombatLockdown() then
+    self._pendingFocusKickMacro = true
+    return false
+  end
+  self._pendingFocusKickMacro = nil
+  local icon = getFocusKickMarker(db.focus_kick_icon)
+  local body = "/stopmacro [noexists][help][dead]\n/focus\n/tm !" .. tostring(icon)
+  -- Macro icons use a file ID. The full .blp path is needed for path lookup;
+  -- a valid question-mark icon keeps the macro draggable if lookup fails.
+  local path = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_" .. tostring(icon) .. ".blp"
+  local texture = GetFileIDFromPath and GetFileIDFromPath(path)
+  if not texture or texture <= 0 then texture = 134400 end
+  local index = GetMacroIndexByName and GetMacroIndexByName(FOCUS_KICK_MACRO_NAME) or 0
+  if index > 0 then
+    local currentBody = GetMacroBody and GetMacroBody(index) or self._focusKickMacroBody
+    local currentIcon
+    if C_Macro and C_Macro.GetSelectedMacroIcon then
+      currentIcon = C_Macro.GetSelectedMacroIcon(index)
+    elseif GetMacroInfo then
+      local _, savedIcon = GetMacroInfo(index)
+      currentIcon = savedIcon
+    else
+      currentIcon = self._focusKickMacroIcon
+    end
+    if currentBody == body and currentIcon == texture then return true end
+  end
+  local ok, result = MacroUtils.CreateOrUpdateMacro(FOCUS_KICK_MACRO_NAME, body, texture)
+  if ok then
+    self._focusKickMacroBody = body
+    self._focusKickMacroIcon = texture
+    self._focusKickMacroError = nil
+    return true
+  end
+  if self._focusKickMacroError ~= result then
+    self._focusKickMacroError = result
+    chatLine(string.format(L.MM_KEYS_FOCUS_KICK_MACRO_ERROR, FOCUS_KICK_MACRO_NAME))
+  end
+  return false
+end
+
+local function challengeMapMatchesInstance(challengeMapID, instanceID)
+  if not (challengeMapID and C_ChallengeMode and C_ChallengeMode.GetMapUIInfo) then return false end
+  local _, _, _, _, _, mapID = C_ChallengeMode.GetMapUIInfo(challengeMapID)
+  return mapID ~= nil and mapID == instanceID
+end
+
+function M:IsFocusKickDungeon()
+  if not (IsInInstance and IsInInstance() and GetInstanceInfo) then return false end
+  local _, instanceType, difficultyID, _, _, _, _, instanceID = GetInstanceInfo()
+  if instanceType ~= "party" or difficultyID ~= 23 then return false end
+  -- Before starting a key, Mythic+ and Mythic 0 share the same difficulty.
+  -- Require the joined Mythic+ listing or an inserted keystone, never just M0.
+  if challengeMapMatchesInstance(self._focusKickChallengeMapID, instanceID) then return true end
+  if C_ChallengeMode and C_ChallengeMode.GetSlottedKeystoneInfo then
+    local mapID = C_ChallengeMode.GetSlottedKeystoneInfo()
+    if challengeMapMatchesInstance(mapID, instanceID) then return true end
+  end
+  if C_LFGList and C_LFGList.GetActiveEntryInfo then
+    local entry = C_LFGList.GetActiveEntryInfo()
+    local mapID = getAcceptedChallengeMapID(entry)
+    if challengeMapMatchesInstance(mapID, instanceID) then return true end
+  end
+  return false
+end
+
+function M:AnnounceFocusKick(localStart)
+  if self._focusKickReadyCheckHandled then return end
+  local db = self.db or self:EnsureDB()
+  if not (db.enabled and db.focus_kick_enabled) then return end
+  if InCombatLockdown and InCombatLockdown() then return end
+  if C_ChatInfo and C_ChatInfo.InChatMessagingLockdown and C_ChatInfo.InChatMessagingLockdown() then return end
+  if self._focusKickRunStarted then return end
+  if C_ChallengeMode and C_ChallengeMode.IsChallengeModeActive and C_ChallengeMode.IsChallengeModeActive() then return end
+  if C_PartyInfo and C_PartyInfo.IsChallengeModeActive and C_PartyInfo.IsChallengeModeActive() then return end
+  if not (IsInGroup and IsInGroup()) or (IsInRaid and IsInRaid()) then return end
+  if not self:IsFocusKickDungeon() then return end
+  -- A rejected DoReadyCheck request must not announce anything. Read the
+  -- timer only after combat/chat lockdown checks because it can be secret.
+  if localStart then
+    local timeLeft = GetReadyCheckTimeLeft and GetReadyCheckTimeLeft()
+    if not timeLeft or (issecretvalue and issecretvalue(timeLeft)) or timeLeft <= 0 then return end
+  end
+  local now = GetTime()
+  if self._lastFocusKickAnnouncement and (now - self._lastFocusKickAnnouncement) < 5 then return end
+  if not self:UpdateFocusKickMacro() then return end
+  local send = C_ChatInfo and C_ChatInfo.SendChatMessage or SendChatMessage
+  if not send then return end
+  local icon, marker = getFocusKickMarker(db.focus_kick_icon)
+  -- Deliberately English so the convention is readable in international groups.
+  local message = string.format("[Kaldo Tweaks] My focus kick marker is {rt%d} (%s).", icon, marker.name)
+  local channel = IsInGroup(LE_PARTY_CATEGORY_INSTANCE or 2) and "INSTANCE_CHAT" or "PARTY"
+  send(message, channel)
+  -- Only a sent announcement consumes the check. A local READY_CHECK may
+  -- arrive inside DoReadyCheck before its post-hook can inspect the state.
+  self._focusKickReadyCheckHandled = true
+  self._lastFocusKickAnnouncement = now
+end
+
+function M:DismissAcceptedTeleportPrompt()
+  self._acceptedTeleportGroup = nil
+  if self._acceptedTeleportPrompt and not (InCombatLockdown and InCombatLockdown()) then
+    self._acceptedTeleportPrompt:Hide()
+    clearTeleportButton(self._acceptedTeleportPrompt.teleportButton)
+  end
+end
+
+function M:CreateAcceptedTeleportPrompt()
+  if self._acceptedTeleportPrompt then return self._acceptedTeleportPrompt end
+  if InCombatLockdown and InCombatLockdown() then return nil end
+
+  local frame = CreateFrame("Frame", "KaldoMMAcceptedTeleportPrompt", UIParent, "BackdropTemplate")
+  frame:SetSize(340, 210)
+  frame:SetPoint("CENTER", UIParent, "CENTER", 0, 150)
+  frame:SetFrameStrata("DIALOG")
+  frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8",
+    edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+  frame:SetBackdropColor(0.03, 0.04, 0.045, 0.96)
+  frame:SetBackdropBorderColor(0.12, 0.39, 0.35, 1)
+  frame:EnableMouse(true)
+  frame:SetMovable(true)
+  frame:RegisterForDrag("LeftButton")
+  frame:SetScript("OnDragStart", function(f)
+    if not (InCombatLockdown and InCombatLockdown()) then f:StartMoving() end
+  end)
+  frame:SetScript("OnDragStop", function(f)
+    if not (InCombatLockdown and InCombatLockdown()) then f:StopMovingOrSizing() end
+  end)
+
+  local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  title:SetPoint("TOPLEFT", 18, -16)
+  title:SetText("Kaldo Tweaks - MM+")
+  title:SetTextColor(0, 0.86, 0.7)
+  local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+  close:SetPoint("TOPRIGHT", -2, -2)
+  close:SetScript("OnClick", function() self:DismissAcceptedTeleportPrompt() end)
+
+  frame.keyLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+  frame.keyLabel:SetPoint("TOP", 0, -48)
+  frame.keyLabel:SetSize(300, 44)
+  frame.status = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  frame.status:SetPoint("TOP", 0, -98)
+  frame.status:SetWidth(300)
+
+  local button = CreateFrame("Button", nil, frame, "SecureActionButtonTemplate,UIPanelButtonTemplate")
+  button:SetSize(260, 30)
+  button:SetPoint("TOP", 0, -128)
+  button:RegisterForClicks("AnyUp", "AnyDown")
+  button:SetText(L.MM_KEYS_TELEPORT_BUTTON)
+  frame.teleportButton = button
+
+  local checkbox = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+  checkbox:SetSize(24, 24)
+  checkbox:SetPoint("BOTTOMLEFT", 16, 14)
+  checkbox.Text:SetText(L.MM_KEYS_TELEPORT_DONT_SHOW)
+  checkbox:SetScript("OnClick", function(clicked)
+    local db = self.db or self:EnsureDB()
+    db.accept_teleport_prompt = not clicked:GetChecked()
+    if not db.accept_teleport_prompt then self:DismissAcceptedTeleportPrompt() end
+    if NS.UI and NS.UI.RefreshModuleOptions then NS.UI:RefreshModuleOptions("MMKeys") end
+  end)
+  frame.dontShow = checkbox
+
+  -- Keep this listener alive if the module is disabled while its secure child
+  -- prevents hiding the window in combat. It also closes after a successful TP.
+  frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+  frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+  frame:SetScript("OnEvent", function(_, event, unit, _, spellID)
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+      if unit == "player" and spellID == button.KaldoTeleportSpellID then
+        self:DismissAcceptedTeleportPrompt()
+      end
+    else
+      if not (IsInGroup and IsInGroup()) then self:DismissAcceptedTeleportPrompt() end
+      self:RefreshAcceptedTeleportPrompt()
+    end
+  end)
+  local elapsedSinceUpdate = 0
+  frame:SetScript("OnUpdate", function(_, elapsed)
+    elapsedSinceUpdate = elapsedSinceUpdate + elapsed
+    if elapsedSinceUpdate < 1 then return end
+    elapsedSinceUpdate = 0
+    self:UpdateAcceptedTeleportStatus()
+  end)
+  frame:Hide()
+  self._acceptedTeleportPrompt = frame
+  return frame
+end
+
+function M:UpdateAcceptedTeleportStatus()
+  local frame = self._acceptedTeleportPrompt
+  if not frame then return end
+  if InCombatLockdown and InCombatLockdown() then
+    frame.status:SetText(L.MM_KEYS_TELEPORT_COMBAT)
+    return
+  end
+  local button = frame.teleportButton
+  local known = isTeleportKnown(button.KaldoTeleportSpellID)
+  local remaining = known and getSpellCooldownRemaining(button.KaldoTeleportSpellID)
+  button:SetEnabled(known and not remaining)
+  if not known then
+    frame.status:SetText(L.MM_KEYS_TELEPORT_NOT_LEARNED)
+  elseif remaining then
+    frame.status:SetText(L.MM_KEYS_TOOLTIP_TELEPORT_COOLDOWN .. ": " .. formatDurationSeconds(remaining))
+  else
+    frame.status:SetText(L.MM_KEYS_TELEPORT_READY)
+  end
+end
+
+function M:RefreshAcceptedTeleportPrompt()
+  local db = self.db or self:EnsureDB()
+  local data = self._acceptedTeleportGroup
+  if not (db.enabled and db.accept_teleport_prompt and data) then
+    self:DismissAcceptedTeleportPrompt()
+    return
+  end
+  if InCombatLockdown and InCombatLockdown() then return end
+  if IsInInstance and IsInInstance() and GetInstanceInfo and C_ChallengeMode then
+    local _, _, _, _, _, _, _, instanceID = GetInstanceInfo()
+    local _, _, _, _, _, dungeonInstanceID = C_ChallengeMode.GetMapUIInfo(data.mapChallengeModeID)
+    if instanceID == dungeonInstanceID then self:DismissAcceptedTeleportPrompt(); return end
+  end
+  local frame = self:CreateAcceptedTeleportPrompt()
+  local spellID = DUNGEON_TELEPORT_SPELLS[data.mapChallengeModeID]
+  clearTeleportButton(frame.teleportButton)
+  frame.teleportButton.KaldoTeleportSpellID = spellID
+  if isTeleportKnown(spellID) then
+    frame.teleportButton:SetAttribute("type1", "spell")
+    frame.teleportButton:SetAttribute("spell1", spellID)
+  end
+  frame.keyLabel:SetText(data.keyLabel or C_ChallengeMode.GetMapUIInfo(data.mapChallengeModeID))
+  frame.dontShow:SetChecked(false)
+  self:UpdateAcceptedTeleportStatus()
+  frame:Show()
+end
+
+function M:ShowAcceptedTeleportPrompt(groupData)
+  local db = self.db or self:EnsureDB()
+  if not (db.enabled and db.accept_teleport_prompt and type(groupData) == "table"
+      and DUNGEON_TELEPORT_SPELLS[groupData.mapChallengeModeID]) then return end
+  local identity = tostring(groupData.searchResultID or groupData.groupName)
+  if self._lastTeleportPromptID == identity then return end
+  self._lastTeleportPromptID = identity
+  self._acceptedTeleportGroup = groupData
+  self:RefreshAcceptedTeleportPrompt()
 end
 
 function M:AnnounceAcceptedGroup(groupData)
-  local db = self.db or self:EnsureDB()
-  if not (db.accept_reminder_chat or db.accept_reminder_screen) then return end
   local groupName = type(groupData) == "table" and groupData.groupName or groupData
-  local keyLabel = type(groupData) == "table" and groupData.keyLabel or nil
   if not groupName or groupName == "" then return end
+  local identity = tostring(type(groupData) == "table" and groupData.searchResultID or groupName)
+  if self._lastAcceptedGroupID == identity then return end
+  self._lastAcceptedGroupID = identity
+  -- Keep the Mythic+ destination even after the teleport popup is dismissed.
+  self._focusKickChallengeMapID = type(groupData) == "table" and groupData.mapChallengeModeID or nil
+  local db = self.db or self:EnsureDB()
+  self:ShowAcceptedTeleportPrompt(groupData)
+  if not (db.accept_reminder_chat or db.accept_reminder_screen) then return end
+  local keyLabel = type(groupData) == "table" and groupData.keyLabel or nil
 
   local now = GetTime()
   if (now - (self._lastReminder or 0)) < 2 then return end
@@ -1704,6 +2007,15 @@ function M:AnnounceAcceptedGroup(groupData)
   end
 end
 
+function M:ClearAcceptedGroupState()
+  self:DismissAcceptedTeleportPrompt()
+  self._lastTeleportPromptID = nil
+  self._lastAcceptedGroupID = nil
+  self._focusKickChallengeMapID = nil
+  self._pendingAcceptedGroupData = nil
+  self._pendingAcceptedAt = 0
+end
+
 function M:CheckGroupJoinReminder()
   local inGroup = IsInGroup and IsInGroup() or false
   if self._wasInGroup == nil then
@@ -1714,14 +2026,13 @@ function M:CheckGroupJoinReminder()
   if inGroup and not self._wasInGroup then
     local now = GetTime and GetTime() or 0
     local isFreshPending = self._pendingAcceptedGroupData
+      and self._pendingAcceptedGroupData.inviteAccepted
       and self._pendingAcceptedAt
       and (now - self._pendingAcceptedAt) <= 30
 
     local groupData = nil
     if isFreshPending then
       groupData = self._pendingAcceptedGroupData
-    else
-      groupData = self:ScanAcceptedGroupData()
     end
 
     if groupData then
@@ -1729,9 +2040,8 @@ function M:CheckGroupJoinReminder()
     end
     self._pendingAcceptedGroupData = nil
     self._pendingAcceptedAt = 0
-  elseif not inGroup then
-    self._pendingAcceptedGroupData = nil
-    self._pendingAcceptedAt = 0
+  elseif not inGroup and self._wasInGroup then
+    self:ClearAcceptedGroupState()
   end
 
   self._wasInGroup = inGroup
@@ -1827,12 +2137,38 @@ function M:RespondKeys(event)
 end
 
 function M:OnEvent(event, ...)
+  if event == "GROUP_LEFT" then
+    local category = ...
+    if not category or category == (LE_PARTY_CATEGORY_HOME or 1) then
+      self:ClearAcceptedGroupState()
+      self._wasInGroup = false
+    end
+    return
+  end
+  if event == "READY_CHECK" then
+    self:AnnounceFocusKick()
+    return
+  end
+  if event == "READY_CHECK_CONFIRM" then
+    local unit, isReady = ...
+    -- The initiator is automatically ready. This also covers server-side
+    -- confirmation arriving after the local API hook, before its timer exists.
+    if unit == "player" and isReady then self:AnnounceFocusKick() end
+    return
+  end
+  if event == "READY_CHECK_FINISHED" then
+    self._focusKickReadyCheckHandled = false
+    return
+  end
   if event == "CHALLENGE_MODE_MAPS_UPDATE" or event == "SPELLS_CHANGED" then
     self:QueueChallengesRefresh()
+    if event == "SPELLS_CHANGED" then self:RefreshAcceptedTeleportPrompt() end
     return
   end
   if event == "PLAYER_LOGIN" then
     self.db = self:EnsureDB()
+    self:HookFocusKickReadyCheck()
+    self:UpdateFocusKickMacro()
     tryHookChallengesFrame(self)
     tryHookCommunitiesFrame(self)
     self._wasInGroup = IsInGroup and IsInGroup() or false
@@ -1855,6 +2191,11 @@ function M:OnEvent(event, ...)
     or event == "PARTY_LEADER_CHANGED"
     or event == "PLAYER_SPECIALIZATION_CHANGED" then
     self:CheckGroupJoinReminder()
+    if event == "PLAYER_ENTERING_WORLD" then
+      self:RefreshAcceptedTeleportPrompt()
+      self:UpdateFocusKickMacro()
+      if not (IsInInstance and IsInInstance()) then self._focusKickRunStarted = false end
+    end
     return
   end
 
@@ -1868,6 +2209,12 @@ function M:OnEvent(event, ...)
     or event == "CHALLENGE_MODE_RESET" then
     self:QueueChallengesRefresh()
     self:UpdateGuildScoreFilterButton()
+    if event == "CHALLENGE_MODE_START" then
+      self._focusKickRunStarted = true
+      self:DismissAcceptedTeleportPrompt()
+    elseif event == "CHALLENGE_MODE_RESET" then
+      self._focusKickRunStarted = false
+    end
     if event ~= "CHALLENGE_MODE_START" then
       self:RefreshGuildRosterScores()
     end
@@ -1875,6 +2222,9 @@ function M:OnEvent(event, ...)
   end
 
   if event == "PLAYER_REGEN_ENABLED" then
+    if self._pendingFocusKickMacro then self:UpdateFocusKickMacro() end
+    if not (IsInGroup and IsInGroup()) then self:DismissAcceptedTeleportPrompt() end
+    self:RefreshAcceptedTeleportPrompt()
     self:RefreshSeasonBestOverlays()
     refreshScorePercentileOverlay(self)
     self:UpdateGuildScoreFilterButton()
@@ -1882,27 +2232,19 @@ function M:OnEvent(event, ...)
     return
   end
 
-  if event == "LFG_PROPOSAL_SUCCEEDED" then
-    local data = self:ScanAcceptedGroupData()
-    if data then
-      self._pendingAcceptedGroupData = data
-      self._pendingAcceptedAt = GetTime and GetTime() or 0
-    end
-    return
-  end
-
   if event == "LFG_LIST_APPLICATION_STATUS_UPDATED" then
-    local searchResultID, status, oldStatus, groupName = ...
-    local data = getAcceptedGroupDataFromEventArgs(searchResultID, status, oldStatus, groupName)
+    -- The third argument is OLD status, not pending status. An invitation
+    -- being cancelled must never be stored as a fresh accepted application.
+    local searchResultID, status, _, groupName = ...
+    local data = getAcceptedGroupDataFromEventArgs(searchResultID, status, groupName)
     if data and data.groupName and data.groupName ~= "" then
+      data.inviteAccepted = status == "inviteaccepted"
       self._pendingAcceptedGroupData = data
       self._pendingAcceptedAt = GetTime and GetTime() or 0
-    else
-      local fallback = self:ScanAcceptedGroupData()
-      if fallback and fallback.groupName and fallback.groupName ~= "" then
-        self._pendingAcceptedGroupData = fallback
-        self._pendingAcceptedAt = GetTime and GetTime() or 0
-      end
+    elseif self._pendingAcceptedGroupData
+        and self._pendingAcceptedGroupData.searchResultID == searchResultID then
+      self._pendingAcceptedGroupData = nil
+      self._pendingAcceptedAt = 0
     end
     return
   end
@@ -1910,6 +2252,11 @@ function M:OnEvent(event, ...)
   if event == "LFG_LIST_JOINED_GROUP" then
     local searchResultID, groupName = ...
     local data = getGroupDataFromSearchResultID(searchResultID, groupName)
+    local pending = self._pendingAcceptedGroupData
+    if not data and pending and pending.searchResultID == searchResultID
+        and (GetTime() - (self._pendingAcceptedAt or 0)) <= 30 then
+      data = pending
+    end
     if data and data.groupName and data.groupName ~= "" then
       self._pendingAcceptedGroupData = data
       self._pendingAcceptedAt = GetTime and GetTime() or 0
