@@ -1,7 +1,10 @@
-v0.9.8
+Unreleased
 New features
 - Quick Shortcuts: replace repair and auction mount dropdowns with checklists showing only mounts known by the character; preserve existing fixed/random choices and randomly choose among checked mounts.
 - Add the Sporebearer Fungal Strider to both checklists, unchecked by default, with a reminder to assign the corresponding NPC.
+
+v0.9.8
+New features
 - MM+ Keys: offer a dungeon teleport window when joining a Mythic+ group, using the listing's activity/map IDs to choose the destination.
 - Show whether the teleport is learned or on cooldown; cast through a secure button and defer opening during combat.
 - Add a persistent "Don't show again" checkbox and the corresponding Kaldo configuration option. Close the window after teleporting, entering the dungeon, or leaving the group.
