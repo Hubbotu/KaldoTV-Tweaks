@@ -1,4 +1,4 @@
-Unreleased
+v0.9.9
 New features
 - Quick Shortcuts: replace repair and auction mount dropdowns with checklists showing only mounts known by the character; preserve existing fixed/random choices and randomly choose among checked mounts.
 - Add the Sporebearer Fungal Strider to both checklists, unchecked by default, with a reminder to assign the corresponding NPC.
