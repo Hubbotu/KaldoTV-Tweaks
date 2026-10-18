@@ -11,8 +11,9 @@ M.events = {
   "SPELLS_CHANGED", "PLAYER_SPECIALIZATION_CHANGED",
 }
 
-local REPAIR_MOUNTS = { yak = 122708, bear = 457485, hearthkeeper = 142515 }
-local AH_MOUNTS = { caravan = 264058, gilded = 465235 }
+local SPOREBEARER = 1313788
+local REPAIR_MOUNTS = { yak = 122708, bear = 457485, hearthkeeper = 142515, sporebearer = SPOREBEARER }
+local AH_MOUNTS = { caravan = 264058, gilded = 465235, sporebearer = SPOREBEARER }
 local ARCANTINA_TOY = 253629
 local ASTRAL_RECALL = 556
 local MAGE_SILVERMOON = { teleport = 1259190, portal = 1259194 } -- Midnight
@@ -26,8 +27,8 @@ local defaults = {
   enabled = false,
   notify = true,
   create_macros = false,
-  repair_mode = "random",
-  auction_mode = "random",
+  repair_selected = {},
+  auction_selected = {},
   hearth_random = true,
   hearth_selected = {},
   hearth_mage = false,
@@ -44,15 +45,16 @@ local function knownSpell(spellID)
     or (C_SpellBook and C_SpellBook.IsSpellInSpellBook and C_SpellBook.IsSpellInSpellBook(spellID))
 end
 
-local function learnedMounts(spells)
+local function learnedMounts(spells, selected)
   local found = {}
   if not (C_MountJournal and C_MountJournal.GetMountIDs and C_MountJournal.GetMountInfoByID) then return found end
   local wanted = {}
   for key, spellID in pairs(spells) do wanted[spellID] = key end
   for _, mountID in ipairs(C_MountJournal.GetMountIDs() or {}) do
-    local _, spellID, _, _, _, _, _, _, _, _, isCollected = C_MountJournal.GetMountInfoByID(mountID)
+    local _, spellID, _, _, _, _, _, _, _, hideForCharacter, isCollected = C_MountJournal.GetMountInfoByID(mountID)
     local key = wanted[spellID]
-    if key and (isCollected or knownSpell(spellID)) then found[#found + 1] = spellID end
+    if key and not hideForCharacter and (isCollected or knownSpell(spellID))
+      and (not selected or selected[key]) then found[#found + 1] = spellID end
   end
   table.sort(found)
   return found
@@ -97,27 +99,57 @@ local function listMacro(ids, command, random)
 end
 
 function M:EnsureDB()
-  return DB:EnsureModuleState("QuickShortcuts", defaults)
+  local db = DB:EnsureModuleState("QuickShortcuts", defaults)
+  -- Migrate fixed/random choices once, including mounts not yet collected.
+  for category, mounts in pairs({ repair = REPAIR_MOUNTS, auction = AH_MOUNTS }) do
+    local field, legacy = category .. "_selected", category .. "_mode"
+    if type(db[field]) ~= "table" then db[field] = {} end
+    for key in pairs(mounts) do
+      if db[field][key] == nil then
+        db[field][key] = key ~= "sporebearer" and
+          (db[legacy] == nil or db[legacy] == "random" or db[legacy] == key)
+      end
+    end
+    db[legacy] = nil
+  end
+  return db
 end
 
 function M:GetOptions()
+  self:EnsureDB()
   local options = {
     { type="header", text=(L and L.QUICK_SHORTCUTS_MOUNTS) or "Utility mounts" },
     { type="keybind", key="bindings.repair", buttonName="KaldoQuickRepairButton", label=(L and L.QUICK_SHORTCUTS_BIND_REPAIR) or "Repair mount shortcut" },
     { type="keybind", key="bindings.auction", buttonName="KaldoQuickAuctionButton", label=(L and L.QUICK_SHORTCUTS_BIND_AUCTION) or "Auction mount shortcut" },
-    { type="select", key="repair_mode", label=(L and L.QUICK_SHORTCUTS_REPAIR_MODE) or "Repair mount", values={
-      { "yak", (L and L.QUICK_SHORTCUTS_YAK) or "Yak" },
-      { "bear", (L and L.QUICK_SHORTCUTS_BEAR) or "Bear" },
-      { "hearthkeeper", (L and L.QUICK_SHORTCUTS_HEARTHKEEPER) or "Hearthkeeper's Wandering Caravan" },
-      { "random", (L and L.QUICK_SHORTCUTS_RANDOM) or "Random owned" },
-    } },
-    { type="input", key="repair_macro_name", label=(L and L.QUICK_SHORTCUTS_REPAIR_MACRO) or "Repair macro name" },
-    { type="select", key="auction_mode", label=(L and L.QUICK_SHORTCUTS_AUCTION_MODE) or "Auction mount", values={
-      { "caravan", (L and L.QUICK_SHORTCUTS_OLD_BRUTO) or "Mighty Caravan Brutosaur" },
-      { "gilded", (L and L.QUICK_SHORTCUTS_GILDED_BRUTO) or "Trader's Gilded Brutosaur" },
-      { "random", (L and L.QUICK_SHORTCUTS_RANDOM) or "Random owned" },
-    } },
-    { type="input", key="auction_macro_name", label=(L and L.QUICK_SHORTCUTS_AUCTION_MACRO) or "Auction macro name" },
+  }
+  local mountLabels = {
+    yak = (L and L.QUICK_SHORTCUTS_YAK) or "Grand Expedition Yak",
+    bear = (L and L.QUICK_SHORTCUTS_BEAR) or "Grizzly Hills Packmaster",
+    hearthkeeper = (L and L.QUICK_SHORTCUTS_HEARTHKEEPER) or "Hearthkeeper's Wandering Caravan",
+    caravan = (L and L.QUICK_SHORTCUTS_OLD_BRUTO) or "Mighty Caravan Brutosaur",
+    gilded = (L and L.QUICK_SHORTCUTS_GILDED_BRUTO) or "Trader's Gilded Brutosaur",
+    sporebearer = (L and L.QUICK_SHORTCUTS_SPOREBEARER) or "Sporebearer Fungal Strider",
+  }
+  for _, category in ipairs({ "repair", "auction" }) do
+    local mounts = category == "repair" and REPAIR_MOUNTS or AH_MOUNTS
+    options[#options + 1] = { type="label", text=category == "repair" and
+      ((L and L.QUICK_SHORTCUTS_REPAIR_MODE) or "Repair mount") or
+      ((L and L.QUICK_SHORTCUTS_AUCTION_MODE) or "Auction house mount") }
+    options[#options + 1] = { type="label", text=(L and L.QUICK_SHORTCUTS_MOUNT_LIST_HINT) or "Randomly choose from checked mounts. Uncheck all to disable this shortcut." }
+    for _, spellID in ipairs(learnedMounts(mounts)) do
+      for key, id in pairs(mounts) do
+        if id == spellID then
+          options[#options + 1] = { type="toggle", key=category .. "_selected." .. key,
+            label=mountLabels[key], tooltip=key == "sporebearer" and
+              ((L and L.QUICK_SHORTCUTS_SPOREBEARER_HINT) or "Enable only if the matching NPC is assigned to this mount.") or nil }
+        end
+      end
+    end
+    options[#options + 1] = { type="input", key=category .. "_macro_name", label=category == "repair" and
+      ((L and L.QUICK_SHORTCUTS_REPAIR_MACRO) or "Repair macro name") or
+      ((L and L.QUICK_SHORTCUTS_AUCTION_MACRO) or "Auction macro name") }
+  end
+  local hearthOptions = {
     { type="header", text=(L and L.QUICK_SHORTCUTS_HEARTH) or "Hearthstone" },
     { type="keybind", key="bindings.hearth", buttonName="KaldoQuickHearthButton", label=(L and L.QUICK_SHORTCUTS_BIND_HEARTH) or "Hearthstone shortcut" },
     { type="toggle", key="hearth_mage", label=(L and L.QUICK_SHORTCUTS_MAGE_PRIORITY) or "Mage: Silvermoon City (Midnight) first (Teleport solo / Portal in a group)" },
@@ -128,6 +160,7 @@ function M:GetOptions()
     { type="header", text=(L and L.QUICK_SHORTCUTS_HEARTH_LIST) or "Included hearthstones" },
     { type="label", text=(L and L.QUICK_SHORTCUTS_HEARTH_LIST_HINT) or "Choose which collected hearthstone toys may be used." },
   }
+  for _, option in ipairs(hearthOptions) do options[#options + 1] = option end
   local names = { [6948] = (L and L.QUICK_SHORTCUTS_HOME_HEARTH) or "Hearthstone" }
   for _, itemID in ipairs(hearthstoneToyItems()) do
     local name
@@ -297,7 +330,7 @@ function M:Apply(name, body)
 end
 
 function M:UpdateMacros()
-  local db = self.db or self:EnsureDB()
+  local db = self:EnsureDB()
   if not db.enabled then
     if InCombatLockdown and InCombatLockdown() then self.pending = true; return end
     if ClearOverrideBindings then ClearOverrideBindings(self.bindingOwner) end
@@ -309,20 +342,10 @@ function M:UpdateMacros()
     end
     return
   end
-  local repair = learnedMounts(REPAIR_MOUNTS)
-  if db.repair_mode ~= "random" then
-    local selected, out = REPAIR_MOUNTS[db.repair_mode], {}
-    for _, spellID in ipairs(repair) do if spellID == selected then out[1] = spellID end end
-    repair = out
-  end
-  local auction = learnedMounts(AH_MOUNTS)
-  if db.auction_mode ~= "random" then
-    local selected, out = AH_MOUNTS[db.auction_mode], {}
-    for _, spellID in ipairs(auction) do if spellID == selected then out[1] = spellID end end
-    auction = out
-  end
-  local repairBody = listMacro(repair, "/cast", db.repair_mode == "random")
-  local auctionBody = listMacro(auction, "/cast", db.auction_mode == "random")
+  local repair = learnedMounts(REPAIR_MOUNTS, db.repair_selected)
+  local auction = learnedMounts(AH_MOUNTS, db.auction_selected)
+  local repairBody = listMacro(repair, "/cast", true)
+  local auctionBody = listMacro(auction, "/cast", true)
 
   if InCombatLockdown and InCombatLockdown() then self.pending = true; return end
   local function setSecure(button, body)
@@ -347,8 +370,8 @@ function M:UpdateMacros()
     end
   end
   if db.create_macros then
-    self:Apply(MacroUtils.NormalizeMacroName(db.repair_macro_name, "KaldoRepairMt"), repairBody)
-    self:Apply(MacroUtils.NormalizeMacroName(db.auction_macro_name, "KaldoBruto"), auctionBody)
+    self:Apply(MacroUtils.NormalizeMacroName(db.repair_macro_name, "KaldoRepairMt"), repairBody or "#showtooltip")
+    self:Apply(MacroUtils.NormalizeMacroName(db.auction_macro_name, "KaldoBruto"), auctionBody or "#showtooltip")
     self:Apply(MacroUtils.NormalizeMacroName(db.hearth_macro_name, "KaldoHearth"), self:BuildHearthMacro())
   end
 end

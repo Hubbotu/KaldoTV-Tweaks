@@ -288,12 +288,15 @@ click()
 expectAction("toy", 253629)
 assert(macros.KaldoHearth == module:BuildHearthMacro(), "Generated macro changed with the cooldown")
 
--- The Hearthkeeper caravan supports fixed and random repair mount selection.
+-- Mount checklists preserve legacy choices and only expose learned mounts.
 reset()
 state.mounts = {
   [1] = { spellID = 122708, collected = true },
   [2] = { spellID = 457485, collected = true },
   [2982] = { spellID = 142515, collected = true },
+  [4] = { spellID = 264058, collected = true },
+  [5] = { spellID = 465235, collected = true },
+  [3137] = { spellID = 1313788, collected = true },
 }
 C_MountJournal = {
   GetMountIDs = function()
@@ -303,13 +306,19 @@ C_MountJournal = {
   end,
   GetMountInfoByID = function(id)
     local mount = state.mounts[id]
-    return "Mount " .. tostring(id), mount.spellID, nil, nil, nil, nil, nil, nil, nil, nil, mount.collected
+    return "Mount " .. tostring(id), mount.spellID, nil, nil, nil, nil, nil, nil, nil, mount.hidden, mount.collected
   end,
 }
 module:UpdateMacros()
 local repairButton = frames.KaldoQuickRepairButton
+local auctionButton = frames.KaldoQuickAuctionButton
 assert(repairButton:GetAttribute("macrotext") == "#showtooltip\n/castrandom 122708,142515,457485")
 assert(macros.KaldoRepairMt == repairButton:GetAttribute("macrotext"))
+assert(auctionButton:GetAttribute("macrotext") == "#showtooltip\n/castrandom 264058,465235")
+assert(state.db.repair_selected.sporebearer == false and state.db.auction_selected.sporebearer == false)
+assert(state.db.repair_mode == nil and state.db.auction_mode == nil)
+-- A legacy fixed choice migrates and remains selected if temporarily unavailable.
+state.db.repair_selected = nil
 state.db.repair_mode = "hearthkeeper"
 module:UpdateMacros()
 assert(repairButton:GetAttribute("macrotext") == "#showtooltip 142515\n/cast 142515")
@@ -317,18 +326,81 @@ assert(macros.KaldoRepairMt == repairButton:GetAttribute("macrotext"))
 state.mounts[2982].collected = false
 module:UpdateMacros()
 assert(repairButton:GetAttribute("type") == nil and repairButton:GetAttribute("macrotext") == nil)
-state.db.repair_mode = "random"
+state.db.repair_selected.yak, state.db.repair_selected.bear = true, true
 module:UpdateMacros()
 assert(repairButton:GetAttribute("macrotext") == "#showtooltip\n/castrandom 122708,457485")
-local foundCaravan = false
-for _, option in ipairs(module:GetOptions()) do
-  if option.key == "repair_mode" then
-    for _, entry in ipairs(option.values) do
-      if entry[1] == "hearthkeeper" then foundCaravan = true end
-    end
+local function mountOptions()
+  local found = {}
+  for _, option in ipairs(module:GetOptions()) do
+    assert(option.key ~= "repair_mode" and option.key ~= "auction_mode", "Legacy mount dropdown remains")
+    if option.key then found[option.key] = option end
   end
+  return found
 end
-assert(foundCaravan, "Hearthkeeper caravan missing from repair mount settings")
+local options = mountOptions()
+assert(not options["repair_selected.hearthkeeper"], "Uncollected caravan is visible")
+assert(options["repair_selected.sporebearer"].type == "toggle")
+assert(options["auction_selected.sporebearer"].type == "toggle")
+state.mounts[2982].collected = true
+assert(mountOptions()["repair_selected.hearthkeeper"].type == "toggle")
+-- Each category can opt into the fungal strider independently.
+state.db.repair_selected.sporebearer = true
+module:UpdateMacros()
+assert(repairButton:GetAttribute("macrotext") == "#showtooltip\n/castrandom 122708,142515,457485,1313788")
+assert(auctionButton:GetAttribute("macrotext") == "#showtooltip\n/castrandom 264058,465235")
+state.db.auction_selected.caravan, state.db.auction_selected.gilded = false, false
+state.db.auction_selected.sporebearer = true
+module:UpdateMacros()
+assert(auctionButton:GetAttribute("macrotext") == "#showtooltip 1313788\n/cast 1313788")
+assert(macros.KaldoBruto == auctionButton:GetAttribute("macrotext"))
+-- No implicit fallback when every checkbox is unchecked, including after reload.
+for key in pairs(state.db.repair_selected) do state.db.repair_selected[key] = false end
+module:OnOptionChanged()
+assert(repairButton:GetAttribute("type") == nil and repairButton:GetAttribute("macrotext") == nil)
+assert(macros.KaldoRepairMt == "#showtooltip", "Unchecked mounts remain in the optional macro")
+module:OnEvent("PLAYER_LOGIN")
+assert(state.db.repair_selected.yak == false and state.db.repair_selected.sporebearer == false)
+-- Losing a mount removes its option and its secure action even if still checked.
+state.mounts[3137].collected = false
+module:OnEvent("COMPANION_LEARNED")
+assert(auctionButton:GetAttribute("macrotext") == nil)
+assert(macros.KaldoBruto == "#showtooltip", "Unknown mount remains in the optional macro")
+options = mountOptions()
+assert(not options["repair_selected.sporebearer"] and not options["auction_selected.sporebearer"])
+state.mounts[3137].collected = true
+state.mounts[3137].hidden = true
+module:UpdateMacros()
+assert(auctionButton:GetAttribute("macrotext") == nil)
+assert(not mountOptions()["auction_selected.sporebearer"], "Mount hidden for this character is visible")
+state.mounts[3137].hidden = nil
+-- Protected attributes update only once combat ends.
+state.inCombat = true
+module:OnOptionChanged()
+assert(module.pending and auctionButton:GetAttribute("macrotext") == nil)
+state.inCombat = false
+module:OnEvent("PLAYER_REGEN_ENABLED")
+assert(auctionButton:GetAttribute("macrotext") == "#showtooltip 1313788\n/cast 1313788")
+
+state.db.auction_selected, state.db.auction_mode = nil, "gilded"
+module:UpdateMacros()
+assert(auctionButton:GetAttribute("macrotext") == "#showtooltip 465235\n/cast 465235")
+assert(state.db.auction_selected.caravan == false and state.db.auction_selected.sporebearer == false)
+-- New settings enable existing mounts, but never the fungal strider by default.
+state.db.repair_selected, state.db.repair_mode = nil, nil
+state.db.auction_selected, state.db.auction_mode = nil, nil
+module:UpdateMacros()
+assert(repairButton:GetAttribute("macrotext") == "#showtooltip\n/castrandom 122708,142515,457485")
+assert(auctionButton:GetAttribute("macrotext") == "#showtooltip\n/castrandom 264058,465235")
+assert(state.db.repair_selected.sporebearer == false and state.db.auction_selected.sporebearer == false)
+-- No collected mounts (or no journal API): show no mount checkboxes and cast nothing.
+state.mounts = {}
+module:UpdateMacros()
+options = mountOptions()
+assert(not options["repair_selected.yak"] and not options["auction_selected.caravan"])
+assert(repairButton:GetAttribute("macrotext") == nil and auctionButton:GetAttribute("macrotext") == nil)
+C_MountJournal = nil
+module:UpdateMacros()
+assert(not mountOptions()["repair_selected.sporebearer"])
 
 -- Keep the legacy cooldown APIs functional as well.
 reset()
@@ -351,4 +423,4 @@ state.knownSpells[1259190] = true
 state.spellCooldowns[1259190] = { startTime = 0, duration = 0, isEnabled = true, modRate = 1 }
 click()
 expectAction("spell", 1259190)
-print("PASS: Hearthstone readiness, Arcantina regression, Mage Midnight priority, Astral Recall priority, selection, secrets, combat, generated macro, Hearthkeeper repair mount, legacy APIs")
+print("PASS: Hearthstone readiness, Arcantina regression, Mage Midnight priority, Astral Recall priority, selection, secrets, combat, generated macro, mount checklists, migration, fungal strider, legacy APIs")
